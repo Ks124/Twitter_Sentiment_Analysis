@@ -1,0 +1,174 @@
+-ingest tweets from kafka producer - streaming
+-setup kafka broker
+-run kafka consumer to consume and run tweets on a selected topic
+-setup flume to get data (also from kafka)
+-hive analysis
+-spark ML
+
+bin/zkServer.sh start
+
+bin/kafka-topics --create --zookeeper localhost:2181 --partitions 3 --replication-factor 1 --topic twitter-sentiments
+
+nohup bin/kafka-server-start etc/kafka/server.properties > /dev/null 2>&1 &
+
+flume:
+flume-ng agent --conf /home/keyur200494184/flume/basic/ -f /home/keyur200494184/flume/basic/basic-flume.conf -Dflume.root.logger=DEBUG,console -n agent
+
+CREATE EXTERNAL TABLE IF NOT EXISTS tweets_table (
+id INT,
+text STRING,
+likes INT,
+retweet_counts INT,
+cleaned_text STRING,
+sentiment STRING)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+LOCATION '/BigData/tweets/'
+TBLPROPERTIES ('creator'='Big Data');
+
+set hive.cli.print.header=true;
+
+SELECT * FROM tweets_table LIMIT 10;
+
+//ALTER TABLE tweets_table SET TBLPROPERTIES (“skip.header.line.count”=”1”);
+
+CREATE TABLE tweets_table2 AS select * from tweets_table where text not like 'text%';
+CREATE TABLE tweets_table3 AS select * from tweets_table where text IS NOT NULL OR cleaned_text IS NOT NULL;
+CREATE TABLE clean_tweets AS select * from tweets_table3 where sentiment IS NOT NULL;
+
+
+spark-shell --master yarn
+
+//SCALA code
+//Import statements
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.expressions.Window
+import org.apache.spark.ml.feature.{VectorAssembler, StringIndexer}
+import org.apache.spark.ml.feature.{RegexTokenizer, StopWordsRemover, CountVectorizer, NGram, IDF, VectorAssembler}
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.classification.{LinearSVC, RandomForestClassificationModel, RandomForestClassifier, GBTClassificationModel, GBTClassifier}
+import org.apache.spark.ml.classification.MultilayerPerceptronClassifier
+import org.apache.spark.ml.tuning.{CrossValidator, CrossValidatorModel, ParamGridBuilder}
+import org.apache.spark.ml.evaluation.{MulticlassClassificationEvaluator}
+import org.apache.spark.ml.param.ParamMap
+import org.apache.spark.sql.types.{IntegerType, DoubleType}
+import org.apache.spark.sql.hive.HiveContext
+import org.apache.spark.sql._
+import org.apache.spark.sql.SQLContext
+//import org.apache.spark.sql.sqlContext.implicits
+import org.apache.spark.sql.SparkSession
+
+
+//Load Data
+val df = spark.sql("SELECT * FROM tweets_db.clean_tweets")
+df.show(10)
+
+df.na.drop(Seq("text")).show(10)
+
+//df.where(~sqlDF["text"].rlike("\d")).show(10)
+//df.filter($"text" rlike "\d").show(10)
+
+//val df2 = df.select(col("*"),when(df.sentiment == "positive",1)
+//                  .when(df.sentiment == "negative",0)
+//                  .otherwise(2).alias("target"))
+
+//Encoding target variable
+val df2 = df.withColumn("target", when(col("sentiment") === "positive", 1).when(col("sentiment") === "negative", 0).when(col("sentiment") === "neutral", 0).otherwise(""))
+
+//remove unnecessary rows
+val final_df_0 = df2.filter(df2("target") !== "")
+	
+val final_df = final_df_0.select(col("text"), col("target").cast(IntegerType))
+
+//Split words
+val tokenizer = new RegexTokenizer()
+ .setPattern("[a-zA-Z']+")
+ .setGaps(false)
+ .setInputCol("text")
+ .setOutputCol("words")
+
+//Remove common words like is, a etc.
+val remover = new StopWordsRemover()
+ .setInputCol("words")
+ .setOutputCol("filtered")
+
+//Trigram - make words pair
+val ngram = new NGram()
+ .setN(3)
+ .setInputCol("filtered")
+ .setOutputCol("ngram-3")
+
+//Index the trigrams
+val cv3: CountVectorizer = new CountVectorizer()
+ .setInputCol("ngram-3")
+ .setOutputCol("ngram-3-features")
+
+//Suppress most common words
+val cv3idf = new IDF()
+ .setInputCol("ngram-3-features")
+ .setOutputCol("cv3-idf-features")
+
+//Train the model with Linear Support Vector Classifier
+val rf = new LinearSVC()
+ .setFeaturesCol("cv3-idf-features")
+ .setLabelCol("target")
+
+val pipeline = new Pipeline()
+ .setStages(Array(tokenizer, remover, ngram, cv3, cv3idf, rf))
+
+val evaluator = new MulticlassClassificationEvaluator()
+ .setLabelCol("target")
+ .setPredictionCol("prediction")
+ .setMetricName("accuracy")
+
+//Hyperparameter Tuning
+//val paramGrid = new ParamGridBuilder()  
+//  .addGrid(rf.maxDepth, Array(2,3,4,5))
+//  .addGrid(rf.impurity, Array("entropy","gini")).build()
+	
+//Cross validate model
+val cross_validator = new CrossValidator()
+ .setEstimator(pipeline)
+ .setEvaluator(evaluator)
+ .setEstimatorParamMaps(new ParamGridBuilder().build)
+ .setNumFolds(3) 
+ 
+val Array(trainingData, testData) = final_df.randomSplit(Array(0.8, 0.2), 111) 
+
+//Train the model on training data
+val model = cross_validator.fit(trainingData)
+
+//Test the model on test data
+val predictions = model.transform(testData)
+
+//Evaluate accuracy
+val accuracy = evaluator.evaluate(predictions)
+println("accuracy on test data = " + accuracy)
+
+model.write.overwrite().save("hdfs://10.128.0.2:8020/BigData/model/svc_model")
+
+val saved_model = CrossValidatorModel.load("hdfs://10.128.0.2:8020/BigData/model/svc_model")
+
+val new_data = spark.read
+.format("csv")
+.option("header", "true")
+.option("inferSchema", "true")
+.load("hdfs://10.128.0.2:8020/BigData/tweets/Tweets.csv")
+
+//Encoding target variable
+val new_df2 = new_data.withColumn("target", when(col("sentiment") === "positive", 1).when(col("sentiment") === "negative", 0).when(col("sentiment") === "neutral", 0).otherwise(""))
+
+//remove unnecessary rows
+val new_df_0 = new_df2.filter(new_df2("target") !== "")
+
+val new_df = new_df_0.select(col("text"), col("target").cast(IntegerType))
+
+val new_pred = saved_model.transform(new_df)
+
+val new_acc = evaluator.evaluate(new_pred)
+println("accuracy on new data = "+new_acc)
+
+//Final output data
+val raw_output = new_pred.select($"text", $"target", $"prediction")
+//Decoding target variable
+val output = raw_output.withColumn("sentiment", when(col("prediction") === 1.0, "positive").when(col("prediction") === 0, "negative"))
+output.show(30)

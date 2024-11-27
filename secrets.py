@@ -1,0 +1,5 @@
+bearer_token = "Write your Bearer Token Here"
+API_Key = "Write your API Key Here"
+API_Key_Secret = "Write your API Key Scret Here"
+Access_Token_Secret = "Write your Access Token Secret here"
+Access_Token = "Put your Access Token here"
