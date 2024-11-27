@@ -16,7 +16,7 @@ The data that is saved to HDFS needs to be cleaned and put into multiple columns
 <b>Step 5: Load Data into Spark SQL</b><br>
 Data then must be loaded into a Scala DataFrame for analysis. Use the Scala DataFrame to run some queries on the data that you have read. The queries will depend on the topic that you have chosen and keywords received from Twitter.
 
-<b>Step 6: Train a Spark ML algorithm</b>
+<b>Step 6: Train a Spark ML algorithm</b><br>
 Using the data in HDFS, train a machine learning algorithm using Spark ML to predict whether the tweets that you have have ingested have positive sentiment or negative sentiment. You can also choose other predictions depending on the topic.
 
 
